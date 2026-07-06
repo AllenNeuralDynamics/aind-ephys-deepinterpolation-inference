@@ -10,6 +10,12 @@ FROM $REGISTRY_HOST/codeocean/kilosort4-base:4.1.7_cuda-12.0.0
 
 ARG DEBIAN_FRONTEND=noninteractive
 
+# wavpack-numcodecs ships no wheels, so pip compiles its Cython C extension from
+# the bundled .c sources. The base image has no C toolchain, so add build tools.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 # SpikeInterface core (does NOT pull torch, preserving the base CUDA torch),
 # plus zarr + WavPack. Pinned to the pipeline's SpikeInterface version so the
 # denoised Zarr is read cleanly by the downstream preprocessing / sorting steps.
