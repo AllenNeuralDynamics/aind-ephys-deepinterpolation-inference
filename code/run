@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -ex
+
+# Master script for the capsule. Mirrors aind-ephys-compress / aind-ephys-preprocessing.
+python -u run_capsule.py "$@"
