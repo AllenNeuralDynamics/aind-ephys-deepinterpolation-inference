@@ -54,6 +54,10 @@ parser.add_argument("--batch-size", default=256, type=int, help="frames per forw
 parser.add_argument("--chunk-duration", default="1s", help="save chunk duration (SpikeInterface)")
 parser.add_argument("--norm-sample-seconds", default=60.0, type=float,
                     help="seconds sampled across the recording to estimate per-channel z-score stats")
+parser.add_argument("--max-test-recordings", default=1, type=int,
+                    help="[standalone] max AP recordings to denoise when no job config is present")
+parser.add_argument("--test-duration-s", default=10.0, type=float,
+                    help="[standalone] clip each recording to this many seconds (0 = full recording)")
 
 
 def _resolve_checkpoint(cli_value):
@@ -69,6 +73,17 @@ def _resolve_checkpoint(cli_value):
         f"{DEFAULT_CHECKPOINT}, and {len(pts)} '*.pt' files under ../data "
         "(expected exactly one). Pass --checkpoint."
     )
+
+
+def _find_ap_recordings(folder):
+    """AP-band zarr recordings under a folder (NP1 '*-AP.zarr' or NP2 'ProbeX.zarr')."""
+    import re
+    zarrs = sorted(str(p) for p in Path(folder).rglob("*.zarr"))
+    def _is_ap(p):
+        b = os.path.basename(p.rstrip("/"))
+        return ("-AP.zarr" in b) or bool(re.search(r"Probe[A-Z]\.zarr$", b))
+    ap = [z for z in zarrs if _is_ap(z)]
+    return ap or zarrs
 
 
 if __name__ == "__main__":
@@ -145,5 +160,33 @@ if __name__ == "__main__":
         )
         with open(results_folder / f"{job_config_file.stem}.json", "w") as f:
             json.dump(job_config, f, indent=4, cls=SIJsonEncoder)
+
+    if not job_config_files:
+        # Standalone / self-test mode: no pipeline job config present, so denoise raw
+        # AP zarr recording(s) found under ../data directly. Validates the capsule end
+        # to end on a real recording (attach an ecephys asset and run with no config).
+        ap = _find_ap_recordings(data_folder)
+        logging.info(f"Standalone mode: found {len(ap)} AP recording(s) under ../data")
+        for zpath in ap[: args.max_test_recordings]:
+            name = os.path.basename(zpath.rstrip("/"))
+            if name.endswith(".zarr"):
+                name = name[:-5]
+            recording = si.read_zarr(zpath)
+            if recording.get_dtype().kind == "u":
+                recording = spre.unsigned_to_signed(recording)
+            if args.test_duration_s and args.test_duration_s > 0:
+                fs = recording.get_sampling_frequency()
+                end = min(recording.get_num_samples(), int(args.test_duration_s * fs))
+                recording = recording.frame_slice(start_frame=0, end_frame=end)
+            logging.info(f"[standalone] denoising {name}: {recording}")
+            t0 = time.perf_counter()
+            denoised = deepinterpolate(
+                recording, checkpoint_path, device=device,
+                batch_size=args.batch_size, norm_sample_seconds=args.norm_sample_seconds,
+            )
+            denoised.save(folder=results_folder / f"{name}_denoised.zarr",
+                          format="zarr", chunk_duration=args.chunk_duration)
+            logging.info(f"[standalone] wrote {name}_denoised.zarr in "
+                         f"{round(time.perf_counter() - t0, 2)}s")
 
     logging.info(f"DEEPINTERPOLATION time: {round(time.perf_counter() - t_all, 2)}s")
