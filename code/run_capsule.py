@@ -106,8 +106,9 @@ if __name__ == "__main__":
     logging.info(f"\tCHUNK_DURATION: {args.chunk_duration}")
 
     job_config_files = [
-        p for p in data_folder.iterdir()
+        p for p in data_folder.rglob("*")
         if (p.suffix in (".json", ".pickle", ".pkl")) and "job" in p.name
+        and ".zarr" not in str(p)  # exclude zarr-internal metadata files
     ]
     logging.info(f"Found {len(job_config_files)} job configuration(s)")
 

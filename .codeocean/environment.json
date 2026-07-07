@@ -1,0 +1,21 @@
+{
+	"version": 1,
+	"base_image": "codeocean/kilosort4-base:4.1.7_cuda-12.0.0",
+	"options": {
+		"registry_host_arg": true,
+		"git_ask_pass": true,
+		"mount_secrets": true
+	},
+	"installers": {
+		"pip": {
+			"packages": [
+				{
+					"name": "spikeinterface",
+					"version": "0.104.8"
+				}
+			],
+			"options": {},
+			"pre_install_options": {}
+		}
+	}
+}

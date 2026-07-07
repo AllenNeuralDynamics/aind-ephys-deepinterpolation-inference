@@ -1,30 +1,10 @@
-# GPU container for the DeepInterpolation inference capsule.
-#
-# Code Ocean requires base images from its own registry (ARG REGISTRY_HOST). We
-# reuse the same CUDA base as the Kilosort4 spike-sorting capsule (it already ships
-# a working CUDA + PyTorch stack), then add SpikeInterface (matching the pipeline's
-# version) + zarr / WavPack so the capsule can read compressed AIND recordings and
-# write the denoised Zarr.
+# hash:sha256:a51fededc75c1b1d92b8281378b933933865499824a1c5dfcb9344fcac2a616a
 ARG REGISTRY_HOST
 FROM $REGISTRY_HOST/codeocean/kilosort4-base:4.1.7_cuda-12.0.0
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG GIT_ASKPASS
+COPY git-ask-pass /
 
-# wavpack-numcodecs ships no wheels, so pip compiles its Cython C extension from
-# the bundled .c sources. The base image has no C toolchain, so add build tools.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# SpikeInterface core (does NOT pull torch, preserving the base CUDA torch),
-# plus zarr + WavPack. Pinned to the pipeline's SpikeInterface version so the
-# denoised Zarr is read cleanly by the downstream preprocessing / sorting steps.
-#
-# wavpack-numcodecs is pinned to 0.2.2: it defaults to WavPack 5.7.0, which ships
-# a prebuilt libwavpack for glibc 2.31 (this base is Ubuntu 20.04 / glibc 2.31).
-# 0.2.3 defaults to WavPack 5.8.0, whose bundled libs only cover glibc 2.35/2.39,
-# so its source build fails on this base.
 RUN pip install -U --no-cache-dir \
-        "spikeinterface==0.103.2" \
-        "wavpack-numcodecs==0.2.2" \
-        "zarr>=2.16,<3"
+    spikeinterface==0.104.8
