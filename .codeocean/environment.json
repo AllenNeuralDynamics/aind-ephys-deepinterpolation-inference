@@ -10,6 +10,10 @@
 		"pip": {
 			"packages": [
 				{
+					"name": "s3fs",
+					"version": "2026.6.0"
+				},
+				{
 					"name": "spikeinterface",
 					"version": "0.104.8"
 				}
