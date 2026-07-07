@@ -4,8 +4,10 @@ Mirrors the IO contract of ``aind-ephys-compress`` / ``aind-ephys-preprocessing`
 reads the ``*job*.json`` configuration file(s) produced by ``aind-ephys-job-dispatch``
 (or the hybrid-generation step), loads each recording with SpikeInterface, applies
 a trained DeepInterpolation model, writes the denoised recording to ``../results``
-as a Zarr folder, and rewrites the job configuration so the next pipeline step
-(preprocessing) loads the denoised recording.
+as a flat binary folder (mirroring ``aind-ephys-preprocessing``, so the downstream
+sorter memory-maps it directly instead of decompressing a Zarr), and rewrites the
+job configuration so the next pipeline step (preprocessing) loads the denoised
+recording.
 
 Placement in the hybrid-benchmark pipeline mirrors ``compress``:
 
@@ -147,12 +149,12 @@ if __name__ == "__main__":
             norm_sample_seconds=args.norm_sample_seconds,
         )
         denoised_saved = denoised.save(
-            folder=results_folder / f"{recording_name}.zarr",
-            format="zarr",
+            folder=results_folder / recording_name,
+            format="binary",
             chunk_duration=args.chunk_duration,
         )
         elapsed = round(time.perf_counter() - t0, 2)
-        logging.info(f"\tDenoised in {elapsed}s -> {recording_name}.zarr")
+        logging.info(f"\tDenoised in {elapsed}s -> {recording_name} (binary)")
 
         # rewrite the job config to point at the denoised recording
         job_config["recording_dict"] = denoised_saved.to_dict(
@@ -184,9 +186,9 @@ if __name__ == "__main__":
                 recording, checkpoint_path, device=device,
                 batch_size=args.batch_size, norm_sample_seconds=args.norm_sample_seconds,
             )
-            denoised.save(folder=results_folder / f"{name}_denoised.zarr",
-                          format="zarr", chunk_duration=args.chunk_duration)
-            logging.info(f"[standalone] wrote {name}_denoised.zarr in "
+            denoised.save(folder=results_folder / f"{name}_denoised",
+                          format="binary", chunk_duration=args.chunk_duration)
+            logging.info(f"[standalone] wrote {name}_denoised (binary) in "
                          f"{round(time.perf_counter() - t0, 2)}s")
 
     logging.info(f"DEEPINTERPOLATION time: {round(time.perf_counter() - t_all, 2)}s")

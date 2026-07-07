@@ -5,7 +5,7 @@ validation segment. For deployment we need to denoise an entire recording, which
 this module does as a lazy SpikeInterface preprocessor:
 
     denoised = deepinterpolate(recording, checkpoint_path)
-    denoised.save(folder=..., format="zarr")   # materializes the denoised traces
+    denoised.save(folder=..., format="binary")  # materializes the denoised traces
 
 The model predicts each center frame from a symmetric window of neighbour frames
 (plus, for the 3-frame SUPPORT hole, the immediately-adjacent t-1/t+1 frames fed
