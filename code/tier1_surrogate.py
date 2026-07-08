@@ -146,28 +146,41 @@ def compute_surrogate(raw_rec, denoised_rec, gt_sorting, n_spikes=200, n_bg=500,
         snr_deep = float((deep_tmpl_ch[:, pc].max() - deep_tmpl_ch[:, pc].min())
                          / max(deep_bg_ch[:, :, pc].std(), 1e-9))
 
-        # matched-filter detectability with a FIXED filter (the raw template)
-        f = raw_tmpl_ch.reshape(-1)
-        f = f / max(np.linalg.norm(f), 1e-9)
-        proj = lambda w: w.reshape(w.shape[0], -1) @ f
-        h_raw, n_raw = proj(raw_wf_ch), proj(raw_bg_ch)
-        h_deep, n_deep = proj(deep_wf), proj(deep_bg_ch)
+        # matched-filter detectability with two filters:
+        #  self  -> each domain scored with its OWN template (raw tmpl on raw,
+        #           deep tmpl on deep) = denoised-domain detectability, ~ what the
+        #           sorter sees (it builds templates from the denoised data).
+        #  fixed -> deep scored with the RAW (true) template = shape fidelity; a
+        #           drop flags that DI reshaped/attenuated the spike.
+        _unit = lambda v: v / max(np.linalg.norm(v), 1e-9)
+        pr = lambda w, f: w.reshape(w.shape[0], -1) @ f
+        f_raw = _unit(raw_tmpl_ch.reshape(-1))
+        f_deep = _unit(deep_tmpl_ch.reshape(-1))
+        h_raw, n_raw = pr(raw_wf_ch, f_raw), pr(raw_bg_ch, f_raw)
+        h_deep_self, n_deep_self = pr(deep_wf, f_deep), pr(deep_bg_ch, f_deep)
+        h_deep_fix, n_deep_fix = pr(deep_wf, f_raw), pr(deep_bg_ch, f_raw)
 
         rows.append(dict(
             unit_id=uid, n_spikes=int(sel.size), peak_ch=peak, n_ch=int(ch.size),
             snr_raw=snr_raw, snr_deep=snr_deep, dsnr=snr_deep - snr_raw,
-            dprime_raw=_dprime(h_raw, n_raw), dprime_deep=_dprime(h_deep, n_deep),
-            auc_raw=_auc(h_raw, n_raw), auc_deep=_auc(h_deep, n_deep),
+            dprime_raw=_dprime(h_raw, n_raw),
+            dprime_deep=_dprime(h_deep_self, n_deep_self),        # self-template
+            dprime_deep_fixed=_dprime(h_deep_fix, n_deep_fix),    # true-shape filter
+            auc_raw=_auc(h_raw, n_raw),
+            auc_deep=_auc(h_deep_self, n_deep_self),
+            auc_deep_fixed=_auc(h_deep_fix, n_deep_fix),
         ))
         if verbose:
             r = rows[-1]
             print(f"[surrogate] unit {uid} ({k+1}/{len(unit_ids)}): "
                   f"SNR {r['snr_raw']:.2f}->{r['snr_deep']:.2f}  "
-                  f"d' {r['dprime_raw']:.2f}->{r['dprime_deep']:.2f}", flush=True)
+                  f"d'self {r['dprime_raw']:.2f}->{r['dprime_deep']:.2f}  "
+                  f"d'shape {r['dprime_raw']:.2f}->{r['dprime_deep_fixed']:.2f}", flush=True)
 
     df = pd.DataFrame(rows)
     if not df.empty:
-        df["ddprime"] = df["dprime_deep"] - df["dprime_raw"]
+        df["ddprime"] = df["dprime_deep"] - df["dprime_raw"]              # self detectability
+        df["ddprime_fixed"] = df["dprime_deep_fixed"] - df["dprime_raw"]  # shape fidelity
         df["dauc"] = df["auc_deep"] - df["auc_raw"]
     return df
 
@@ -175,13 +188,16 @@ def compute_surrogate(raw_rec, denoised_rec, gt_sorting, n_spikes=200, n_bg=500,
 def summarize(df):
     if df.empty:
         return "no units scored"
-    m = df[["snr_raw", "snr_deep", "dprime_raw", "dprime_deep", "auc_raw", "auc_deep"]].mean()
+    cols = ["snr_raw", "snr_deep", "dprime_raw", "dprime_deep",
+            "dprime_deep_fixed", "auc_raw", "auc_deep"]
+    m = df[cols].mean()
     return (
         f"units={len(df)}\n"
-        f"  SNR   raw {m.snr_raw:.3f} -> deep {m.snr_deep:.3f}  (Δ {m.snr_deep - m.snr_raw:+.3f})\n"
-        f"  d'    raw {m.dprime_raw:.3f} -> deep {m.dprime_deep:.3f}  (Δ {m.dprime_deep - m.dprime_raw:+.3f})\n"
-        f"  AUC   raw {m.auc_raw:.3f} -> deep {m.auc_deep:.3f}  (Δ {m.auc_deep - m.auc_raw:+.3f})\n"
-        f"  units with d' improved: {(df.dprime_deep > df.dprime_raw).sum()}/{len(df)}"
+        f"  SNR       raw {m.snr_raw:.3f} -> deep {m.snr_deep:.3f}  (Δ {m.snr_deep - m.snr_raw:+.3f})\n"
+        f"  d' self   raw {m.dprime_raw:.3f} -> deep {m.dprime_deep:.3f}  (Δ {m.dprime_deep - m.dprime_raw:+.3f})   [denoised-domain detectability]\n"
+        f"  d' shape  raw {m.dprime_raw:.3f} -> deep {m.dprime_deep_fixed:.3f}  (Δ {m.dprime_deep_fixed - m.dprime_raw:+.3f})   [true-shape fidelity]\n"
+        f"  AUC self  raw {m.auc_raw:.3f} -> deep {m.auc_deep:.3f}\n"
+        f"  units with d'(self) improved: {(df.dprime_deep > df.dprime_raw).sum()}/{len(df)}"
     )
 
 
@@ -241,16 +257,21 @@ def sweep_checkpoints(raw, gt, checkpoint_paths, device="cuda", batch_size=256,
         if per_unit_dir is not None:
             Path(per_unit_dir).mkdir(parents=True, exist_ok=True)
             df.to_csv(Path(per_unit_dir) / f"{cp.stem}.csv", index=False)
-        m = df[["snr_raw", "snr_deep", "dprime_raw", "dprime_deep", "auc_deep"]].mean()
+        m = df[["snr_raw", "snr_deep", "dprime_raw", "dprime_deep",
+                "dprime_deep_fixed", "auc_deep"]].mean()
         rows.append(dict(
             checkpoint=cp.name, n_units=len(df),
             snr_raw=m.snr_raw, snr_deep=m.snr_deep, dsnr=m.snr_deep - m.snr_raw,
             dprime_raw=m.dprime_raw, dprime_deep=m.dprime_deep,
-            ddprime=m.dprime_deep - m.dprime_raw, auc_deep=m.auc_deep,
+            ddprime=m.dprime_deep - m.dprime_raw,
+            dprime_deep_fixed=m.dprime_deep_fixed,
+            ddprime_fixed=m.dprime_deep_fixed - m.dprime_raw,
+            auc_deep=m.auc_deep,
             units_dprime_up=int((df.dprime_deep > df.dprime_raw).sum()),
         ))
-        print(f"  mean d' {m.dprime_raw:.2f}->{m.dprime_deep:.2f} "
+        print(f"  d'self {m.dprime_raw:.2f}->{m.dprime_deep:.2f} "
               f"(\u0394{m.dprime_deep - m.dprime_raw:+.2f})  "
+              f"d'shape ->{m.dprime_deep_fixed:.2f}  "
               f"SNR {m.snr_raw:.2f}->{m.snr_deep:.2f}", flush=True)
     return (pd.DataFrame(rows)
             .sort_values("dprime_deep", ascending=False).reset_index(drop=True))
