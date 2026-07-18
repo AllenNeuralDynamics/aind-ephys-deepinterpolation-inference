@@ -11,11 +11,16 @@ Two per-unit scores are reported for the raw recording and the denoised one:
   * template SNR  = peak-to-peak of the unit's average waveform (its own template,
                     per domain) on its peak channel, divided by the background
                     noise sigma in that domain.
-  * matched-filter d' / AUC = separability of spike vs background detection scores
-                    using a FIXED filter (the *raw* template). Because the filter
-                    is the same for both domains, a rise means denoising made the
-                    true spike shape more detectable against noise; a fall flags
-                    shape distortion. Captures both the recall and precision axes.
+    * matched-filter d' / AUC with two filters:
+            - self-template: each domain uses its own template, approximating a sorter
+                that learns templates after denoising;
+            - fixed-template: denoised windows use the raw-domain template, measuring
+                compatibility with the empirical raw spike shape.
+
+The template and hit scores currently use the same selected spike windows. The
+self-template value is therefore an in-sample detection surrogate and its absolute
+magnitude is optimistic; model comparisons are frozen to identical events and
+background windows. A cross-fitted endpoint metric is a separate follow-up.
 
 Usage
 -----
@@ -41,6 +46,41 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # ---------------------------------------------------------------------------
 # scoring core (spike-sorter-free; operates on any SpikeInterface recordings)
 # ---------------------------------------------------------------------------
+def validate_frame_alignment(recording, sorting):
+    """Reject recording/sorting pairs that do not share one frame coordinate system."""
+    recording_fs = float(recording.get_sampling_frequency())
+    sorting_fs = float(sorting.get_sampling_frequency())
+    if recording_fs != sorting_fs:
+        raise ValueError(
+            f"sampling-frequency mismatch: recording={recording_fs} sorting={sorting_fs}"
+        )
+    recording_segments = int(recording.get_num_segments())
+    sorting_segments = int(sorting.get_num_segments())
+    if recording_segments != sorting_segments:
+        raise ValueError(
+            f"segment-count mismatch: recording={recording_segments} sorting={sorting_segments}"
+        )
+    if recording_segments != 1:
+        raise ValueError(f"scorer requires exactly one segment, got {recording_segments}")
+
+    num_samples = int(recording.get_num_samples(segment_index=0))
+    for unit_id in sorting.unit_ids:
+        spike_train = np.asarray(
+            sorting.get_unit_spike_train(unit_id, segment_index=0)
+        )
+        if spike_train.ndim != 1:
+            raise ValueError(f"unit {unit_id} spike train is not one-dimensional")
+        if not np.issubdtype(spike_train.dtype, np.integer):
+            raise ValueError(
+                f"unit {unit_id} spike train must contain integer frame indices, "
+                f"got {spike_train.dtype}"
+            )
+        if spike_train.size and (spike_train.min() < 0 or spike_train.max() >= num_samples):
+            raise ValueError(
+                f"unit {unit_id} spike frames fall outside recording [0, {num_samples})"
+            )
+
+
 def _extract(recording, times, nbefore, nafter):
     """Stack (n_times, T, n_channels) waveforms by denoising/reading only the
     requested windows. For a lazy DI recording each ``get_traces`` call denoises
@@ -75,6 +115,7 @@ def compute_surrogate(raw_rec, denoised_rec, gt_sorting, n_spikes=200, n_bg=500,
                       ms_before=1.5, ms_after=2.5, peak_frac=0.5, max_channels=24,
                       max_units=None, seed=0, verbose=True):
     """Return a per-GT-unit DataFrame of raw vs denoised SNR and matched-filter d'."""
+    validate_frame_alignment(raw_rec, gt_sorting)
     fs = raw_rec.get_sampling_frequency()
     nbefore = int(round(ms_before * fs / 1000.0))
     nafter = int(round(ms_after * fs / 1000.0))
