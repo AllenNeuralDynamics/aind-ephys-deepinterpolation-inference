@@ -31,6 +31,29 @@ def _pick_groups(requested: int, channels: int) -> int:
     return max(g, 1)
 
 
+def channel_schedule(base_channels: int, depth: int, channel_mult: float = 2.0,
+                     channel_cap: int = 0) -> list[int]:
+    """Return per-level widths; defaults reproduce the legacy doubling pyramid."""
+    if base_channels < 1:
+        raise ValueError("base_channels must be positive")
+    if depth < 1:
+        raise ValueError("depth must be positive")
+    if channel_mult < 1.0:
+        raise ValueError("channel_mult must be at least 1")
+    if channel_cap and channel_cap < base_channels:
+        raise ValueError("channel_cap must be 0 or at least base_channels")
+
+    channels = []
+    for level in range(depth + 1):
+        width = int(round(base_channels * channel_mult ** level))
+        if channel_cap:
+            width = min(width, channel_cap)
+        if channels:
+            width = max(width, channels[-1])
+        channels.append(width)
+    return channels
+
+
 class DoubleConv1d(nn.Module):
     """(Conv1d -> Norm -> GELU) x2, with an optional residual skip.
     norm: "group" = GroupNorm (default); "none" = no normalization (SUPPORT-style)."""
@@ -152,9 +175,9 @@ class Up1d(nn.Module):
     def __init__(self, in_ch, skip_ch, out_ch, residual=True, norm="group",
                  block_type="doubleconv"):
         super().__init__()
-        self.up = nn.ConvTranspose1d(in_ch, in_ch // 2, 2, stride=2)
+        self.up = nn.ConvTranspose1d(in_ch, skip_ch, 2, stride=2)
         self.conv = temporal_stage(
-            in_ch // 2 + skip_ch, out_ch, residual, norm, block_type
+            2 * skip_ch, out_ch, residual, norm, block_type
         )
 
     def forward(self, x, skip):
@@ -294,14 +317,16 @@ class DeepInterpUNet1D(nn.Module):
     def __init__(self, in_frames: int, base_channels: int = 32, depth: int = 4,
                  residual: bool = True, attention_bottleneck: bool = False,
                  out_activation: str = "none", out_channels: int = 1,
-                 norm: str = "group", block_type: str = "doubleconv"):
+                 norm: str = "group", block_type: str = "doubleconv",
+                 channel_mult: float = 2.0, channel_cap: int = 0):
         super().__init__()
         assert in_frames >= 2, "need at least 2 context frames"
         assert depth >= 1
         self.in_frames = in_frames
         self.depth = depth
 
-        chans = [base_channels * (2 ** i) for i in range(depth + 1)]
+        chans = channel_schedule(base_channels, depth, channel_mult, channel_cap)
+        self.channels = tuple(chans)
         self.stem = temporal_stage(
             in_frames, chans[0], residual, norm, block_type
         )
@@ -353,14 +378,16 @@ class BlindSpotDeepInterp1D(nn.Module):
                  residual: bool = True, attention_bottleneck: bool = False,
                  out_activation: str = "none", bs_channels: int = 64,
                  bs_depth: int = 5, fuse_channels: int = 64,
-                 temporal_block: str = "doubleconv"):
+                 temporal_block: str = "doubleconv", channel_mult: float = 2.0,
+                 channel_cap: int = 0):
         super().__init__()
         assert in_frames >= 3, "need >= 2 neighbors + 1 center frame"
         self.in_frames = in_frames
         self.unet = DeepInterpUNet1D(
             in_frames=in_frames - 1, base_channels=base_channels, depth=depth,
             residual=residual, attention_bottleneck=attention_bottleneck,
-            out_activation="none", block_type=temporal_block)
+            out_activation="none", block_type=temporal_block,
+            channel_mult=channel_mult, channel_cap=channel_cap)
         self.bsnet = BlindSpotBranch1d(out_ch=bs_channels, depth=bs_depth)
         # pointwise fusion only (preserves the blind spot)
         self.fuse = nn.Sequential(
@@ -623,7 +650,7 @@ class FoldDeepInterp1D(nn.Module):
                  bs_channels=64, bs_depth=5, fuse_channels=64, blind_spot=True,
                  bs_frames=1, temporal_mult=1,
                  bs_stage=False, bs_dense=False, bs_multiscale=False, norm="group",
-                 temporal_block="doubleconv"):
+                 temporal_block="doubleconv", channel_mult=2.0, channel_cap=0):
         super().__init__()
         self.grid = _Grid(flat_pos, H, W)
         self.W = int(W)
@@ -641,7 +668,8 @@ class FoldDeepInterp1D(nn.Module):
             in_frames=nf * self.W, base_channels=base_channels, depth=depth,
             residual=residual, attention_bottleneck=attention_bottleneck,
             out_activation="none", out_channels=u_out, norm=norm,
-            block_type=temporal_block)
+            block_type=temporal_block, channel_mult=channel_mult,
+            channel_cap=channel_cap)
         self.bs_stage = bool(bs_stage) and self.blind_spot
         self.bs_dense = bool(bs_dense) and self.blind_spot
         self.bs_multiscale = bool(bs_multiscale) and self.blind_spot
@@ -788,6 +816,8 @@ def build_model(cfg: dict, in_frames: int, grid=None):
                 bs_multiscale=bool(cfg.get("bs_multiscale", False)),
                 norm=str(cfg.get("norm", "group")),
                 temporal_block=str(cfg.get("temporal_block", "doubleconv")),
+                channel_mult=float(cfg.get("channel_mult", 2.0)),
+                channel_cap=int(cfg.get("channel_cap", 0)),
                 **common)
         if bool(cfg.get("blind_spot", False)):
             return BlindSpotDeepInterp2D(
@@ -811,6 +841,8 @@ def build_model(cfg: dict, in_frames: int, grid=None):
             bs_depth=int(cfg.get("bs_depth", 5)),
             fuse_channels=int(cfg.get("fuse_channels", 64)),
             temporal_block=str(cfg.get("temporal_block", "doubleconv")),
+            channel_mult=float(cfg.get("channel_mult", 2.0)),
+            channel_cap=int(cfg.get("channel_cap", 0)),
         )
     return DeepInterpUNet1D(
         in_frames=in_frames,
@@ -820,6 +852,8 @@ def build_model(cfg: dict, in_frames: int, grid=None):
         attention_bottleneck=bool(cfg.get("attention_bottleneck", False)),
         out_activation=cfg.get("out_activation", "none"),
         block_type=str(cfg.get("temporal_block", "doubleconv")),
+        channel_mult=float(cfg.get("channel_mult", 2.0)),
+        channel_cap=int(cfg.get("channel_cap", 0)),
     )
 
 
